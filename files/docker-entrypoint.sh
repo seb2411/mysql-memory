@@ -56,18 +56,14 @@ _check_config() {
 	fi
 }
 
-# Fetch value from server config
-# We use mysqld --verbose --help instead of my_print_defaults because the
-# latter only show values present in config files, and not server defaults
-_get_config() {
-	local conf="$1"; shift
-	"$@" --verbose --help --log-bin-index="$(mktemp -u)" 2>/dev/null | awk '$1 == "'"$conf"'" { print $2; exit }'
+_datadir() {
+	"$@" --verbose --help --log-bin-index="$(mktemp -u)" 2>/dev/null | awk '$1 == "datadir" { print $2; exit }'
 }
 
 # allow the container to be started with `--user`
 if [ "$1" = 'mysqld' -a -z "$wantHelp" -a "$(id -u)" = '0' ]; then
 	_check_config "$@"
-	DATADIR="$(_get_config 'datadir' "$@")"
+	DATADIR="$(_datadir "$@")"
 	mkdir -p "$DATADIR"
 	chown -R mysql:mysql "$DATADIR"
 	exec gosu mysql "$BASH_SOURCE" "$@"
@@ -77,7 +73,7 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 	# still need to check config, container may have started with --user
 	_check_config "$@"
 	# Get config
-	DATADIR="$(_get_config 'datadir' "$@")"
+	DATADIR="$(_datadir "$@")"
 
 	if [ ! -d "$DATADIR/mysql" ]; then
 		file_env 'MYSQL_ROOT_PASSWORD'
@@ -90,14 +86,13 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 		mkdir -p "$DATADIR"
 
 		echo 'Initializing database'
-		mysql_install_db --datadir="$DATADIR" --rpm --basedir=/usr/local/mysql
+		mysql_install_db --datadir="$DATADIR" --rpm --keep-my-cnf
 		echo 'Database initialized'
 
-		SOCKET="$(_get_config 'socket' "$@")"
-		"$@" --skip-networking --basedir=/usr/local/mysql --socket="${SOCKET}" &
+		"$@" --skip-networking --socket=/var/run/mysqld/mysqld.sock &
 		pid="$!"
 
-		mysql=( mysql --protocol=socket -uroot -hlocalhost --socket="${SOCKET}" )
+		mysql=( mysql --protocol=socket -uroot -hlocalhost --socket=/var/run/mysqld/mysqld.sock)
 
 		for i in {30..0}; do
 			if echo 'SELECT 1' | "${mysql[@]}" &> /dev/null; then
@@ -180,9 +175,9 @@ if [ "$1" = 'mysqld' -a -z "$wantHelp" ]; then
 		done
 
 		if [ ! -z "$MYSQL_ONETIME_PASSWORD" ]; then
-			echo >&2
-			echo >&2 'Sorry, this version of MySQL does not support "PASSWORD EXPIRE" (required for MYSQL_ONETIME_PASSWORD).'
-			echo >&2
+			"${mysql[@]}" <<-EOSQL
+				ALTER USER 'root'@'%' PASSWORD EXPIRE;
+			EOSQL
 		fi
 		if ! kill -s TERM "$pid" || ! wait "$pid"; then
 			echo >&2 'MySQL init process failed.'
